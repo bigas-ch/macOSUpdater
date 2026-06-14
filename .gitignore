@@ -1,0 +1,21 @@
+.DS_Store
+
+# Swift Package Manager (Phase 1.0+)
+swift/.build/
+swift/Package.resolved
+swift/.swiftpm/
+swift/dist/
+*.swiftmodule
+*.dSYM
+
+# macOS Finder/Spotlight Duplikat-Artefakte ("filename 2.ext")
+* [0-9].*
+
+# pre-commit Hook-Logs (in /tmp, falls Hook lokal copyt wird)
+.pre-commit-*.log
+
+# Legacy-Snapshots (lokales Recovery-Netz vor Code-Edits; nicht in Public-Clone)
+_legacy_*/
+
+# Claude Code lokales Dev-Tooling (Slash-Commands etc.) — nicht ins Public-Release
+.claude/

@@ -1,0 +1,164 @@
+#!/bin/bash
+# ════════════════════════════════════════════════════════════════
+#  pre-commit hook — macOSUpdater
+# ════════════════════════════════════════════════════════════════
+#  Verhindert Drift zwischen Code und Tests durch automatische
+#  Verifikation vor jedem Commit:
+#
+#    - bats tests/  (~5s)   bei zsh-Hauptscript/Daemon/Test-Edits
+#    - xcrun swift build  (~10-40s) bei swift/Sources oder Tests
+#
+#  Smart-Skip: nur die Suite läuft, deren Files im Staged-Index
+#  liegen. Reine README-/.gitignore-Edits → no-op
+#  (kein Slowdown bei Trivial-Commits).
+#
+#  Bypass (nur in Notfällen):
+#    git commit --no-verify
+#
+#  Aktivierung nach Klon/Re-Clone:
+#    git config core.hooksPath .githooks
+# ════════════════════════════════════════════════════════════════
+
+set -euo pipefail
+
+REPO_ROOT=$(git rev-parse --show-toplevel)
+cd "$REPO_ROOT"
+
+# Farben für Output
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+CYAN='\033[0;36m'; BOLD='\033[1m'; DIM='\033[2m'; NC='\033[0m'
+
+# ── Was ist staged? ──────────────────────────────────────────────
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+
+# Wenn nichts staged ist (z.B. --allow-empty), trotzdem grünes Go
+[[ -z "$staged" ]] && exit 0
+
+# Pattern-Match: welche Test-Suite braucht's?
+needs_bats=$(echo "$staged" | grep -E '^(tests/|macOSUpdater_v|macOSUpdater_daemon\.sh|uninstall_macOSUpdater\.sh|setup_macOSUpdater_v|ch\.bigas\.macOSUpdater\.plist|_constants\.sh)' || true)
+needs_swift=$(echo "$staged" | grep -E '^swift/(Package\.swift|Sources/|Tests/|build\.sh)' || true)
+# Lint: jedes produktive Shell-Skript (zsh -n bzw. shellcheck), nicht Verlauf/_legacy/swift.
+needs_lint=$(echo "$staged" | grep -E '\.sh$' | grep -vE '^(Verlauf/|_legacy_|swift/)' || true)
+
+# Kein relevanter Touch → exit 0 (Trivial-Commit)
+if [[ -z "$needs_bats" && -z "$needs_swift" && -z "$needs_lint" ]]; then
+  echo -e "${DIM}pre-commit: keine Test-relevanten Files staged, skip.${NC}"
+  exit 0
+fi
+
+echo -e "\n${BOLD}${CYAN}═══ pre-commit Hook ═══${NC}"
+
+# ── Lint (Security-first: zsh-Track via `zsh -n`, bash-Track via ShellCheck) ──
+# ShellCheck kann kein zsh (Befund SC1071) → der root-Daemon u.a. werden nativ
+# per `zsh -n` syntaxgeprüft; nur das bash-Hauptskript + die gesourcte
+# _constants.sh gehen an ShellCheck. Das Tool ist optional (lokal): fehlt es,
+# wird der bash-Lint übersprungen (CI erzwingt ihn). zsh ist System → immer da.
+if [[ -n "$needs_lint" ]]; then
+  echo -e "${BOLD}▶ Lint${NC}  ${DIM}(Shell-Skript-Änderung erkannt)${NC}"
+  lint_fail=0
+  have_sc=0
+  if command -v shellcheck >/dev/null 2>&1; then have_sc=1; fi
+  if [[ $have_sc -eq 0 ]]; then
+    echo -e "${YELLOW}  ⚠ shellcheck fehlt — bash-Lint übersprungen (CI erzwingt). Install: brew install shellcheck${NC}"
+  fi
+  for f in macOSUpdater_daemon.sh macOSUpdater_v1.0.0.sh setup_macOSUpdater_v1.0.0.sh uninstall_macOSUpdater.sh _constants.sh; do
+    if [[ ! -f "$f" ]]; then continue; fi
+    shebang=$(head -1 "$f")
+    case "$shebang" in
+      *zsh*)
+        if ! zsh -n "$f" 2>/tmp/.pre-commit-lint.err; then
+          echo -e "${RED}  ✗ zsh -n: $f${NC}"; cat /tmp/.pre-commit-lint.err; lint_fail=1
+        fi ;;
+      *)
+        # bash-Shebang oder shebang-los (gesourcte _constants.sh mit shellcheck-Direktive)
+        if [[ $have_sc -eq 1 ]]; then
+          if ! shellcheck -S style -x "$f" 2>/tmp/.pre-commit-lint.err; then
+            echo -e "${RED}  ✗ shellcheck: $f${NC}"; cat /tmp/.pre-commit-lint.err; lint_fail=1
+          fi
+        fi ;;
+    esac
+  done
+  if [[ $lint_fail -ne 0 ]]; then
+    echo -e "${RED}✗ Lint fehlgeschlagen — Commit blockiert${NC}"
+    echo -e "${DIM}  Bypass (Notfall): git commit --no-verify${NC}"
+    exit 1
+  fi
+  echo -e "${GREEN}✓ Lint: zsh -n + shellcheck sauber${NC}"
+fi
+
+# ── bats ────────────────────────────────────────────────────────
+if [[ -n "$needs_bats" ]]; then
+  echo -e "${BOLD}▶ bats tests/${NC}  ${DIM}(zsh-Track Änderungen erkannt)${NC}"
+  if ! command -v bats >/dev/null 2>&1; then
+    echo -e "${RED}✗ bats nicht gefunden im PATH${NC}"
+    echo -e "${DIM}  Install: brew install bats-core${NC}"
+    exit 1
+  fi
+  if ! bats tests/ > /tmp/.pre-commit-bats.log 2>&1; then
+    echo -e "${RED}✗ bats fehlgeschlagen — Commit blockiert${NC}"
+    tail -30 /tmp/.pre-commit-bats.log
+    echo -e "\n${DIM}  Volles Log: /tmp/.pre-commit-bats.log${NC}"
+    echo -e "${DIM}  Bypass (Notfall): git commit --no-verify${NC}"
+    exit 1
+  fi
+  pass=$(grep -c '^ok ' /tmp/.pre-commit-bats.log || echo 0)
+  echo -e "${GREEN}✓ bats: $pass Tests grün${NC}"
+fi
+
+# ── swift build ─────────────────────────────────────────────────
+if [[ -n "$needs_swift" ]]; then
+  if ! command -v xcrun >/dev/null 2>&1; then
+    echo -e "${RED}✗ xcrun nicht gefunden — Xcode CLT installiert?${NC}"
+    exit 1
+  fi
+
+  # swift-testing 6.3+ hängt -l_TestingInterop an (#if compiler(>=6.3)) und
+  # erwartet die Lib aus einer Voll-Toolchain — CommandLineTools-only fehlt der
+  # Linker-Such-/rpath. Daher die GESAMTE Swift-Sektion (build UND test)
+  # konsistent unter der Xcode-Toolchain: gemischte Toolchains im selben .build
+  # triggern SPM-Re-Resolve und hinterlassen kaputte checkouts. Ohne Xcode →
+  # CLT-Build + toolchain-freier self-test als Fallback.
+  if [[ -d /Applications/Xcode.app ]]; then
+    export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+  fi
+
+  echo -e "${BOLD}▶ xcrun swift build${NC}  ${DIM}(Swift-Track Änderungen erkannt)${NC}"
+  if ! ( cd swift && xcrun swift build 2>&1 ) > /tmp/.pre-commit-swift.log; then
+    echo -e "${RED}✗ swift build fehlgeschlagen — Commit blockiert${NC}"
+    tail -30 /tmp/.pre-commit-swift.log
+    echo -e "\n${DIM}  Volles Log: /tmp/.pre-commit-swift.log${NC}"
+    echo -e "${DIM}  Bypass (Notfall): git commit --no-verify${NC}"
+    exit 1
+  fi
+  echo -e "${GREEN}✓ swift build: erfolgreich${NC}"
+
+  # Wenn swift/Tests/ oder Sources/ geändert wurden, auch tests laufen.
+  needs_swift_test=$(echo "$staged" | grep -E '^swift/(Sources/|Tests/)' || true)
+  if [[ -n "$needs_swift_test" ]]; then
+    if [[ -n "${DEVELOPER_DIR:-}" ]]; then
+      echo -e "${BOLD}▶ swift test${NC}  ${DIM}(Sources/Tests berührt — Xcode-Toolchain)${NC}"
+      if ! ( cd swift && xcrun swift test 2>&1 ) > /tmp/.pre-commit-swift-test.log; then
+        echo -e "${RED}✗ swift test fehlgeschlagen — Commit blockiert${NC}"
+        tail -30 /tmp/.pre-commit-swift-test.log
+        echo -e "${DIM}  Bypass (Notfall): git commit --no-verify${NC}"
+        exit 1
+      fi
+      test_count=$(grep -cE '^✔ Test ' /tmp/.pre-commit-swift-test.log || echo 0)
+      echo -e "${GREEN}✓ swift test: $test_count Tests grün${NC}"
+    else
+      echo -e "${BOLD}▶ self-test${NC}  ${DIM}(kein Xcode — CLT-only Fallback)${NC}"
+      # Swift-Track eingefroren: Binary-Name bleibt OSXforgedUpdater (nicht Teil des macOSUpdater-Rename)
+      swift_bin="$( ( cd swift && xcrun swift build --show-bin-path 2>/dev/null ) )/OSXforgedUpdater"
+      if ! "$swift_bin" self-test > /tmp/.pre-commit-swift-test.log 2>&1; then
+        echo -e "${RED}✗ self-test fehlgeschlagen — Commit blockiert${NC}"
+        tail -30 /tmp/.pre-commit-swift-test.log
+        echo -e "${DIM}  Bypass (Notfall): git commit --no-verify${NC}"
+        exit 1
+      fi
+      echo -e "${GREEN}✓ self-test grün (swift test übersprungen: kein Xcode)${NC}"
+    fi
+  fi
+fi
+
+echo -e "${BOLD}${GREEN}═══ pre-commit OK ═══${NC}\n"
+exit 0

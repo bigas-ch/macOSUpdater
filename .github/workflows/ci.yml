@@ -1,0 +1,66 @@
+name: CI
+
+# bats-Suite auf einem macOS-Runner — der einzige Ort, an dem die zsh-/launchd-/
+# stat-BSD-Semantik real getestet wird (lokaler pre-commit-Hook ist nur ein
+# Fast-Check). Läuft am GitHub-Mirror (Codeberg = primärer Host, GitHub =
+# selektiver Mirror für gratis macOS-CI).
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Minimale Rechte: der Job liest nur den Code aus.
+permissions:
+  contents: read
+
+# Superseded Läufe desselben Refs abbrechen (spart Runner-Minuten).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: lint (shellcheck + zsh -n)
+    # Security-first Gate: shellcheck kann zsh nicht (SC1071), daher der zsh-Track
+    # (inkl. root-Daemon) über `zsh -n`, der bash-Track über shellcheck.
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: brew install shellcheck
+
+      - name: zsh -n (zsh-Track — Daemon, setup, uninstall)
+        # zsh ist System auf macOS-Runnern. Nativer Syntax-Check, blockierend.
+        run: |
+          for f in macOSUpdater_daemon.sh setup_macOSUpdater_v1.0.0.sh \
+                   uninstall_macOSUpdater.sh; do
+            echo "zsh -n $f"; zsh -n "$f"
+          done
+
+      - name: shellcheck (bash-Track — Hauptskript + gesourcte _constants.sh)
+        run: shellcheck -S style -x macOSUpdater_v1.0.0.sh _constants.sh
+
+  bats:
+    name: bats (macOS)
+    # Gepinnt für Reproduzierbarkeit — bewusst aktualisieren, nicht durch
+    # macos-latest-Image-Bumps still brechen lassen.
+    runs-on: macos-15
+    # Großzügige Deadline: der Runner ist 3–5× langsamer als die Entwicklungs-
+    # maschine; die Tests pollen (kein fixes sleep), daher genügt eine Obergrenze.
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install bats-core
+        # jq ist auf GitHub-macOS-Runnern vorinstalliert; perl/zsh sind System.
+        # mas/softwareupdate werden in den Tests gestubbt — keine Installation nötig.
+        run: brew install bats-core
+
+      - name: Run bats suite
+        # Hermetisch: läuft als non-root Runner-User, MACUP_TEST_MODE + Stubs
+        # greifen, kein realer sudo/softwareupdate.
+        run: bats --print-output-on-failure tests/

@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>ch.bigas.macOSUpdater</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/zsh</string>
+    <string>/Library/Application Support/ch.bigas.macOSUpdater/macOSUpdater_daemon.sh</string>
+  </array>
+
+  <key>UserName</key>
+  <string>root</string>
+
+  <key>WatchPaths</key>
+  <array>
+    <string>__WATCH_PATH__</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>KeepAlive</key>
+  <false/>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>/var/log/macOSUpdater.log</string>
+  <key>StandardErrorPath</key>
+  <string>/var/log/macOSUpdater.log</string>
+</dict>
+</plist>
